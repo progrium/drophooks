@@ -1,14 +1,18 @@
 from google.appengine.ext import webapp, db
 from google.appengine.ext.webapp import util
 from google.appengine.ext.webapp import template
+from google.appengine.api import urlfetch
+from google.appengine.api import taskqueue
 from django.utils import simplejson as json
 
 from dropbox import client, rest, auth
 from oauth.oauth import OAuthToken
+from google.appengine.api import memcache
 
 import urllib
 import base64
 
+POLL_INTERVAL = 60 # seconds
 
 config = auth.Authenticator.load_config("drophooks.ini")
 
@@ -18,6 +22,7 @@ class DropboxUser(db.Model):
     oauth_token = db.StringProperty()
     oauth_token_secret = db.StringProperty()
     callback_url = db.StringProperty(default='')
+    size = db.StringProperty()
 
     @classmethod
     def get_by_uid(cls, uid):
@@ -52,7 +57,7 @@ class LoginHandler(webapp.RequestHandler):
         dba = auth.Authenticator(config)
         req_token = dba.obtain_request_token()
         base64_token = urllib.quote(base64.b64encode(req_token.to_string()))
-        self.redirect(dba.build_authorize_url(req_token, callback="http://localhost:8103/callback/%s" % base64_token))
+        self.redirect(dba.build_authorize_url(req_token, callback="http://%s/callback/%s" % (self.request.host, base64_token) ))
 
 class LoginCallbackHandler(webapp.RequestHandler):
     def get(self, token):
@@ -72,17 +77,61 @@ class LoginCallbackHandler(webapp.RequestHandler):
         user.email = account['email']
         user.put()
         
+        if user.size is None:
+            taskqueue.add(url='/tasks/poll', params={'uid': uid})
+        
         self.redirect('/')
     
-
 class LogoutHandler(webapp.RequestHandler):
     def get(self):
         self.response.headers.add_header('Set-Cookie', 'uid=; path=/; expires=Thu, 01-Jan-1970 00:00:01 GMT;')
         self.redirect(self.request.get('redirect_to'))
 
+class GrueHandler(webapp.RequestHandler):
+    def get(self):
+        
+        user = DropboxUser.get_current(self)
+        
+        if user:
+            token = OAuthToken(user.oauth_token, user.oauth_token_secret)
+            dba = auth.Authenticator(config)
+            db_client = client.DropboxClient(config['server'], config['content_server'], config['port'], dba, token)
+
+            dirinfo = json.loads(db_client.metadata('dropbox', '').body)
+            
+            if 'contents' in dirinfo:
+                self.response.out.write(dirinfo['contents'])
+            else: 
+                self.response.out.write('no contents, bro')
+        else:
+            print "There was no user, bro."
+        
+class PollTask(webapp.RequestHandler):
+    def post(self):
+        uid = self.request.get('uid')
+        if uid is not None:
+            taskqueue.add(url='/tasks/poll', params={'uid': uid}, countdown=POLL_INTERVAL)
+            user = DropboxUser.get_by_uid(uid)
+            token = OAuthToken(user.oauth_token, user.oauth_token_secret)
+            dba = auth.Authenticator(config)
+            db_client = client.DropboxClient(config['server'], config['content_server'], config['port'], dba, token)
+            account_info = json.loads(db_client.account_info().body)
+            size = str(account_info['quota_info']['normal'])
+
+            if user.size != size:
+                params = {'changed': 'yeah'}
+                urlfetch.fetch(url=user.callback_url, payload=urllib.urlencode(params), method='POST')
+
+            user.size = size
+            user.put()
+
+
+
 def main():
     application = webapp.WSGIApplication([
         ('/', MainHandler),
+        ('/grue/rocks', GrueHandler),
+        ('/tasks/poll', PollTask),
         ('/login', LoginHandler),
         ('/logout', LogoutHandler),
         ('/callback/(.*)', LoginCallbackHandler),     ], debug=True)
