@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+  <head>
+  </head>
+  <body>
+    <h1>DropHooks</h1>
+    {% if user %}
+    <p>You're logged in as: <strong>{{user.email}}</strong> <a href="/logout?redirect_to=/">Logout</a></p>
+    
+      <h4>Your webhook:</h4>
+      {{user.callback_url}}
+      
+      <h4>Edit webhook:</h4>
+      <form method="post">
+        <input type="text" name="callback_url" size="50" value="{{user.callback_url}}" />
+        <input type="submit" />
+      </form>
+    
+    {% else %}
+      <a href="/login">Login with your DropBox account</a>
+      
+    {% endif %}
+  </body>
+</html>
